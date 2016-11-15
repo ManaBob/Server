@@ -1,0 +1,14 @@
+{
+  "name": "ManaBob.Server",
+  "version": "0.0.0",
+  "description": "ManaBob.Server",
+  "main": "server.js",
+  "author": {
+    "name": "yeseul",
+    "email": "lilynys13@gmail.com"
+  },
+  "dependencies":{
+		"socket.io":"0.9.16"
+		
+	}
+}
