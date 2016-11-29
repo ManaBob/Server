@@ -16,7 +16,6 @@ namespace TestChatClient
         static void OnSendCB(object _sender, int _slen)
         {
             INetService netSvc = _sender as INetService;
-            Console.WriteLine("Send -> Recv...");
             netSvc.RecvAsync();
         }
 

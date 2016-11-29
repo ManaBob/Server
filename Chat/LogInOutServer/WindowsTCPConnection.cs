@@ -8,21 +8,21 @@ using System.Net.Sockets;
 
 using Chat.Portable;
 
-namespace EchoServer
+namespace LogInOutServer
 {
     /// <summary>
     /// TCP Connection for Windows. Nonblocking. Internal byte buffer
     /// </summary>
-    public class WindowsTCPConnection : IConnection
+    public class WindowsTCPConnection : IConn
     {
         Socket sock;
         byte[] buffer = new byte[512];
 
-        EventHandler<Byte[]>    onReceive;
-        EventHandler<int>       onSend;
-        EventHandler            onClose;
-        EventHandler            onDisconnect;
-        EventHandler<Exception> onExcept;
+        EventHandler<Byte[]>    onRecvHandler;
+        EventHandler<int>       onSendHandler;
+        EventHandler            onCloseHandler;
+        EventHandler<IConn>     onDisconnectHandler;
+        EventHandler<Exception> onExceptHandler;
 
 
         public WindowsTCPConnection(Socket _sock)
@@ -36,30 +36,30 @@ namespace EchoServer
         }
 
 
-        public EventHandler<byte[]>     OnReceive
+        public EventHandler<byte[]>     OnRecv
         {
-            get { return onReceive; }
-            set { onReceive = value; }
+            get { return onRecvHandler; }
+            set { onRecvHandler = value; }
         }
         public EventHandler<int>        OnSend
         {
-            get { return onSend; }
-            set { onSend = value; }
+            get { return onSendHandler; }
+            set { onSendHandler = value; }
         }
         public EventHandler             OnClose
         {
-            get{    return onClose;     }
-            set{    onClose = value;    }
+            get{    return onCloseHandler;     }
+            set{ onCloseHandler = value;    }
         }
-        public EventHandler             OnDisconnect
+        public EventHandler<IConn>      OnDisconnect
         {
-            get { return onDisconnect; }
-            set { onDisconnect = value; }
+            get { return onDisconnectHandler; }
+            set { onDisconnectHandler = value; }
         }
         public EventHandler<Exception>  OnException
         {
-            get { return onExcept; }
-            set { onExcept = value; }
+            get { return onExceptHandler; }
+            set { onExceptHandler = value; }
         }
 
 
@@ -111,9 +111,9 @@ namespace EchoServer
                 Byte[] recvBuf = new Byte[rlen];
                 Buffer.BlockCopy(buffer, 0, recvBuf, 0, recvBuf.Length);
                 // Invoke Callback
-                if (OnReceive != null)
+                if (OnRecv != null)
                 {
-                    OnReceive.Invoke(this, recvBuf);
+                    OnRecv.Invoke(this, recvBuf);
                 }
             }
             catch (Exception _exc)

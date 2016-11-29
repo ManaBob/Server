@@ -10,9 +10,9 @@ namespace Chat.Portable
 
     public interface IAccepter : IDisposable
     {
-        EventHandler<IConnection> OnConnection { get; set; }
-        void AcceptAsync();
+        EventHandler<IConn> OnConnection { get; set; }
 
+        void AcceptAsync();
     }
 
 }

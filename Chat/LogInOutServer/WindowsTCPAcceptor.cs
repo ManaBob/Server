@@ -8,7 +8,7 @@ using System.Net.Sockets;
 
 using Chat.Portable;
 
-namespace EchoServer
+namespace LogInOutServer
 {
     /// <summary>
     /// TCP Base Accepter. Nonblocking
@@ -19,7 +19,7 @@ namespace EchoServer
                                     SocketType.Stream, 
                                     ProtocolType.Tcp);
 
-        EventHandler<IConnection> onConnect;
+        EventHandler<IConn> onConnectHandler;
 
         public WindowsTCPAcceptor(IPEndPoint _serverEp, int _backlog = 7)
         {
@@ -28,10 +28,10 @@ namespace EchoServer
             accSock.Blocking = false;
         }
 
-        public EventHandler<IConnection> OnConnection
+        public EventHandler<IConn> OnConnection
         {
-            get { return onConnect;  }
-            set { onConnect = value; }
+            get { return onConnectHandler;  }
+            set { onConnectHandler = value; }
         }
 
         public void AcceptAsync()
@@ -39,14 +39,14 @@ namespace EchoServer
             accSock.BeginAccept(new AsyncCallback(OnAccept), accSock);
         }
 
-        public void OnAccept(IAsyncResult _conn)
+        private void OnAccept(IAsyncResult _conn)
         {
             if (_conn == null) { return; }
             Socket aSock = (Socket)_conn.AsyncState;
             Socket cSock = aSock.EndAccept(_conn);
 
             // Handle Connection...
-            IConnection conn = new WindowsTCPConnection(cSock);
+            IConn conn = new WindowsTCPConnection(cSock);
             if (OnConnection != null)
             {
                 OnConnection.Invoke(this, conn);

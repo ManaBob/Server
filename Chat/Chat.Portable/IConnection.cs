@@ -5,7 +5,7 @@ using System.Text;
 
 namespace Chat.Portable
 {
-    public interface IConnection : IDisposable
+    public interface IConn : IDisposable
     {
         void WriteAsync(Byte[] _bytes, bool _ownership);
         void ReadAsync();
@@ -13,11 +13,11 @@ namespace Chat.Portable
 
         bool IsAlive        { get; }
 
-        EventHandler<Byte[]>    OnReceive    { get; set; }
-        EventHandler<int>       OnSend       { get; set; }
-        EventHandler            OnClose      { get; set; }
-        EventHandler            OnDisconnect { get; set; }
-        EventHandler<Exception> OnException  { get; set; }
+        EventHandler<Byte[]>    OnRecv          { get; set; }
+        EventHandler<int>       OnSend          { get; set; }
+        EventHandler            OnClose         { get; set; }
+        EventHandler<IConn>     OnDisconnect    { get; set; }
+        EventHandler<Exception> OnException     { get; set; }
 
     }
 

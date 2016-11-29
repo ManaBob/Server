@@ -5,11 +5,11 @@ using System.Runtime.InteropServices;
 // General Information about an assembly is controlled through the following 
 // set of attributes. Change these attribute values to modify the information
 // associated with an assembly.
-[assembly: AssemblyTitle("EchoServer")]
+[assembly: AssemblyTitle("LogInOutServer")]
 [assembly: AssemblyDescription("")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("")]
-[assembly: AssemblyProduct("EchoServer")]
+[assembly: AssemblyProduct("LogInOutServer")]
 [assembly: AssemblyCopyright("Copyright ©  2016")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
@@ -20,7 +20,7 @@ using System.Runtime.InteropServices;
 [assembly: ComVisible(false)]
 
 // The following GUID is for the ID of the typelib if this project is exposed to COM
-[assembly: Guid("1e2e0732-04f7-46d8-9aca-b33bd540ddb5")]
+[assembly: Guid("fa9e0a31-7f0e-4c08-b7c7-d3f052ab1f53")]
 
 // Version information for an assembly consists of the following four values:
 //
