@@ -27,8 +27,14 @@ io.sockets.on('connection', function (socket) {
             users[socket.nickname].emit('LoginState', { state: true });
 		 	
         }
+		socket.on('connection',function(socket){
+			consle.log('a user connected');
+			soket.on('disconnect',function(){
+					console.log('user disconnected');
+		});
 		socket.on('message', function(data){
 					console.log('received: ' + JSON.stringify(data));
+				//[TODO] json file broadcast
 					socket.emit('news_response', { hello : 'world'});
 				});
 
