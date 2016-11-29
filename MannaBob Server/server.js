@@ -1,5 +1,5 @@
-svar http = require('http');
-var port = process.env.port || 3000;
+var app = require('exxpress')();
+var http = require('http');
 var server = require('http').createServer();
 var io = require('socket.io').listen(server);
 
@@ -27,14 +27,27 @@ io.sockets.on('connection', function (socket) {
             users[socket.nickname].emit('LoginState', { state: true });
 		 	
         }
+		socket.on('message', function(data){
+					console.log('received: ' + JSON.stringify(data));
+					socket.emit('news_response', { hello : 'world'});
+				});
 
+					socket.on('news',function(data){
+									console.log('received news');
+									socket.emit('news_response',{hello:'world'});
+									socket.json.send({foo:'json'});
+									socket.send('ThisIsAMessage');
+								});
+
+					socket.on('disconnect',function(){
+									console.log('disconnected');
+								});	
     });
     
 
 })
 
-
-server.listen(port);
+server.listen(3000);
 
 
 
