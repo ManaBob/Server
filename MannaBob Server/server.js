@@ -5,14 +5,15 @@ var io = require('socket.io').listen(server);
 
 var users = {};
 
+#chatting check connection
 io.sockets.on('connection', function (socket) {
     
+		# check is login user
     socket.on('loginUser', function (username) {
 
         console.log('User enter to function loginUser');
         
         if (username in users) {
-            
             socket.emit('ErrorLogin', { msg: 'Usernam is in used' });
             console.log('User Name:' + username + ' is logged');
             users[socket.nickname].emit('LoginState', { state: false });
@@ -32,6 +33,7 @@ io.sockets.on('connection', function (socket) {
 			soket.on('disconnect',function(){
 					console.log('user disconnected');
 		});
+		# message communication
 		socket.on('message', function(data){
 					console.log('received: ' + JSON.stringify(data));
 				//[TODO] json file broadcast
