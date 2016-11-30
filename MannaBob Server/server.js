@@ -5,10 +5,10 @@ var io = require('socket.io').listen(server);
 
 var users = {};
 
-#chatting check connection
+ //chatting check connection
 io.sockets.on('connection', function (socket) {
     
-		# check is login user
+		//check is login user
     socket.on('loginUser', function (username) {
 
         console.log('User enter to function loginUser');
@@ -33,7 +33,7 @@ io.sockets.on('connection', function (socket) {
 			soket.on('disconnect',function(){
 					console.log('user disconnected');
 		});
-		# message communication
+		// message communication
 		socket.on('message', function(data){
 					console.log('received: ' + JSON.stringify(data));
 				//[TODO] json file broadcast
