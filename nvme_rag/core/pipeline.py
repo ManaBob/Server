@@ -106,6 +106,9 @@ class NVMeRAGPipeline:
         로컬 Qdrant 저장 경로. 예: "./qdrant_db"
     qdrant_collection :
         사용할 컬렉션 이름 (기본값: "nvme_docs")
+    enable_hybrid :
+        True이면 dense + sparse(SPLADE) 벡터를 모두 저장해 Hybrid Search를 활성화.
+        fastembed 패키지가 필요합니다. (기본값: False)
 
     Neo4j 파라미터
     ----------------------------------------
@@ -129,6 +132,7 @@ class NVMeRAGPipeline:
         qdrant_port: int = 6333,
         qdrant_path: Optional[str] = None,
         qdrant_collection: str = "nvme_docs",
+        enable_hybrid: bool = False,
         # Neo4j
         neo4j_url: Optional[str] = None,
         neo4j_username: str = "neo4j",
@@ -149,6 +153,7 @@ class NVMeRAGPipeline:
         self._qdrant_port = qdrant_port
         self._qdrant_path = qdrant_path
         self._qdrant_collection = qdrant_collection
+        self._enable_hybrid = enable_hybrid
 
         # Neo4j 설정 저장
         self._neo4j_url = neo4j_url
@@ -176,10 +181,14 @@ class NVMeRAGPipeline:
                 "Qdrant를 사용하려면 qdrant_host 또는 qdrant_path를 지정하세요."
             )
 
-        print(f"[Qdrant] 컬렉션: '{self._qdrant_collection}'")
+        mode = "hybrid" if self._enable_hybrid else "dense"
+        print(f"[Qdrant] 컬렉션: '{self._qdrant_collection}' | 모드: {mode}")
         return QdrantVectorStore(
             client=client,
             collection_name=self._qdrant_collection,
+            enable_hybrid=self._enable_hybrid,
+            # hybrid 모드에서 sparse 인코더 배치 크기
+            batch_size=20,
         )
 
     # ------------------------------------------------------------------
@@ -335,7 +344,9 @@ class NVMeRAGPipeline:
         self,
         question: str,
         similarity_top_k: int = 5,
+        sparse_top_k: int = 10,
         response_mode: str = "compact",
+        hybrid: Optional[bool] = None,
     ):
         """
         벡터 인덱스로 질문에 대한 답변을 생성합니다.
@@ -343,22 +354,37 @@ class NVMeRAGPipeline:
         Parameters
         ----------
         question : 질문 문자열
-        similarity_top_k : 검색할 상위 청크 수
+        similarity_top_k : dense 검색 상위 청크 수
+        sparse_top_k : sparse 검색 상위 청크 수 (hybrid 모드에서만 사용)
         response_mode : "compact" | "refine" | "tree_summarize"
+        hybrid : True면 hybrid 검색 강제. None이면 enable_hybrid 설정을 따름.
         """
         if self._index is None:
             raise RuntimeError("인덱스가 없습니다. build_index() 또는 load_index()를 먼저 호출하세요.")
 
-        query_engine = self._index.as_query_engine(
-            similarity_top_k=similarity_top_k,
-            response_mode=response_mode,
-        )
+        use_hybrid = hybrid if hybrid is not None else self._enable_hybrid
+
+        if use_hybrid:
+            from llama_index.core.vector_stores.types import VectorStoreQueryMode
+            query_engine = self._index.as_query_engine(
+                similarity_top_k=similarity_top_k,
+                sparse_top_k=sparse_top_k,
+                vector_store_query_mode=VectorStoreQueryMode.HYBRID,
+                response_mode=response_mode,
+            )
+        else:
+            query_engine = self._index.as_query_engine(
+                similarity_top_k=similarity_top_k,
+                response_mode=response_mode,
+            )
         return query_engine.query(question)
 
     def retrieve(
         self,
         question: str,
         similarity_top_k: int = 5,
+        sparse_top_k: int = 10,
+        hybrid: Optional[bool] = None,
     ) -> list:
         """
         질문과 유사한 청크를 검색합니다 (LLM 생성 없이 검색만).
@@ -370,9 +396,19 @@ class NVMeRAGPipeline:
         if self._index is None:
             raise RuntimeError("인덱스가 없습니다.")
 
-        retriever = self._index.as_retriever(
-            similarity_top_k=similarity_top_k,
-        )
+        use_hybrid = hybrid if hybrid is not None else self._enable_hybrid
+
+        if use_hybrid:
+            from llama_index.core.vector_stores.types import VectorStoreQueryMode
+            retriever = self._index.as_retriever(
+                similarity_top_k=similarity_top_k,
+                sparse_top_k=sparse_top_k,
+                vector_store_query_mode=VectorStoreQueryMode.HYBRID,
+            )
+        else:
+            retriever = self._index.as_retriever(
+                similarity_top_k=similarity_top_k,
+            )
         return retriever.retrieve(question)
 
     # ------------------------------------------------------------------

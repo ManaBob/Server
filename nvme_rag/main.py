@@ -73,6 +73,7 @@ def make_pipeline(args):
         getattr(args, "qdrant_collection", None)
         or os.environ.get("QDRANT_COLLECTION", "nvme_docs")
     )
+    enable_hybrid = getattr(args, "hybrid", False)
 
     neo4j_url = getattr(args, "neo4j_url", None) or os.environ.get("NEO4J_URL")
     neo4j_username = (
@@ -94,6 +95,7 @@ def make_pipeline(args):
         qdrant_port=qdrant_port,
         qdrant_path=qdrant_path,
         qdrant_collection=qdrant_collection,
+        enable_hybrid=enable_hybrid,
         neo4j_url=neo4j_url,
         neo4j_username=neo4j_username,
         neo4j_password=neo4j_password,
@@ -165,8 +167,14 @@ def cmd_query(args):
 
     print(f"\n[Query] {args.question}\n")
 
+    sparse_top_k = getattr(args, "sparse_top_k", 10)
+
     if args.retrieve_only:
-        nodes = pipeline.retrieve(args.question, similarity_top_k=args.top_k)
+        nodes = pipeline.retrieve(
+            args.question,
+            similarity_top_k=args.top_k,
+            sparse_top_k=sparse_top_k,
+        )
         for i, node in enumerate(nodes, 1):
             meta = node.node.metadata
             print(
@@ -180,6 +188,7 @@ def cmd_query(args):
         response = pipeline.query(
             args.question,
             similarity_top_k=args.top_k,
+            sparse_top_k=sparse_top_k,
             response_mode=args.mode,
         )
         print("[Answer]")
@@ -234,6 +243,10 @@ def main():
     qdrant_ex.add_argument("--qdrant-path", help="Qdrant 로컬 저장 경로 (예: ./qdrant_db)")
     qdrant_group.add_argument("--qdrant-port", type=int, default=6333, help="Qdrant 포트 (기본: 6333)")
     qdrant_group.add_argument("--qdrant-collection", default="nvme_docs", help="Qdrant 컬렉션 이름")
+    qdrant_group.add_argument(
+        "--hybrid", action="store_true",
+        help="Hybrid Search 활성화 (dense + sparse SPLADE 벡터, fastembed 필요)"
+    )
 
     # Neo4j 공통 옵션
     neo4j_group = parser.add_argument_group("Neo4j (그래프 스토어)")
@@ -278,7 +291,8 @@ def main():
     p_query.add_argument("question", help="질문 문자열")
     p_query.add_argument("--pdf", help="인덱스 없을 때 사용할 PDF")
     p_query.add_argument("--persist", default="./nvme_index", help="인덱스 디렉토리")
-    p_query.add_argument("--top-k", type=int, default=5, help="검색할 청크 수")
+    p_query.add_argument("--top-k", type=int, default=5, help="dense 검색 상위 청크 수")
+    p_query.add_argument("--sparse-top-k", type=int, default=10, help="sparse 검색 상위 청크 수 (hybrid 모드)")
     p_query.add_argument(
         "--mode",
         choices=["compact", "refine", "tree_summarize"],
