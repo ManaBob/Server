@@ -3,11 +3,36 @@ NVMe RAG Pipeline (LlamaIndex)
 -------------------------------
 NVMeChunk -> LlamaIndex TextNode -> VectorStoreIndex 흐름을 담당합니다.
 
+지원 벡터 스토어:
+  - 기본 (in-memory)  : Qdrant 설정 없이 사용
+  - Qdrant            : qdrant_* 파라미터 전달 시 자동 사용
+
+지원 그래프 스토어:
+  - Neo4j             : build_graph_index() 호출 시 사용
+
 사용 예:
-    pipeline = NVMeRAGPipeline(openai_api_key="...")
-    pipeline.build_index("NVM_Express_Base_Specification.pdf")
-    result = pipeline.query("What is the maximum queue depth for NVMe?")
-    print(result.response)
+    # 기본 (in-memory)
+    pipeline = NVMeRAGPipeline()
+    pipeline.build_index("nvme_spec.pdf")
+
+    # Qdrant (원격)
+    pipeline = NVMeRAGPipeline(
+        qdrant_host="localhost", qdrant_port=6333, qdrant_collection="nvme"
+    )
+    pipeline.build_index("nvme_spec.pdf")
+
+    # Qdrant (로컬 파일)
+    pipeline = NVMeRAGPipeline(qdrant_path="./qdrant_db", qdrant_collection="nvme")
+    pipeline.build_index("nvme_spec.pdf")
+
+    # Neo4j 그래프
+    pipeline = NVMeRAGPipeline(
+        neo4j_url="bolt://localhost:7687",
+        neo4j_username="neo4j",
+        neo4j_password="password",
+    )
+    pipeline.build_graph_index("nvme_spec.pdf")
+    result = pipeline.query_graph("NVMe command set란?")
 """
 
 from __future__ import annotations
@@ -19,10 +44,10 @@ from llama_index.core import (
     Settings,
     StorageContext,
     VectorStoreIndex,
+    KnowledgeGraphIndex,
     load_index_from_storage,
 )
 from llama_index.core.schema import TextNode
-from llama_index.core.node_parser import SimpleNodeParser
 
 from .chunker import NVMeChunker, NVMeChunk
 
@@ -38,7 +63,6 @@ def nvme_chunks_to_nodes(chunks: list[NVMeChunk]) -> list[TextNode]:
         node = TextNode(
             text=chunk.text,
             metadata=chunk.to_metadata(),
-            # 메타데이터 중 검색 시 함께 임베딩할 필드 지정
             metadata_template="{key}: {value}",
             text_template=(
                 "Section {section_number} - {section_title}\n"
@@ -46,7 +70,6 @@ def nvme_chunks_to_nodes(chunks: list[NVMeChunk]) -> list[TextNode]:
                 "{content}"
             ),
         )
-        # 섹션 제목을 excluded_embed_metadata_keys에서 제외해 임베딩에 포함
         node.excluded_embed_metadata_keys = [
             "chunk_index",
             "page_end",
@@ -74,7 +97,29 @@ class NVMeRAGPipeline:
         LlamaIndex LLM. None이면 Settings.llm 사용.
     chunker_kwargs :
         NVMeChunker 생성자에 전달할 키워드 인자.
-        예: {"max_chunk_size": 1200, "overlap_size": 150}
+
+    Qdrant 파라미터 (둘 중 하나를 선택)
+    ----------------------------------------
+    qdrant_host, qdrant_port :
+        원격 Qdrant 서버 주소. 예: "localhost", 6333
+    qdrant_path :
+        로컬 Qdrant 저장 경로. 예: "./qdrant_db"
+    qdrant_collection :
+        사용할 컬렉션 이름 (기본값: "nvme_docs")
+    enable_hybrid :
+        True이면 dense + sparse(SPLADE) 벡터를 모두 저장해 Hybrid Search를 활성화.
+        fastembed 패키지가 필요합니다. (기본값: False)
+
+    Neo4j 파라미터
+    ----------------------------------------
+    neo4j_url :
+        Neo4j Bolt URL. 예: "bolt://localhost:7687"
+    neo4j_username :
+        Neo4j 사용자 이름 (기본값: "neo4j")
+    neo4j_password :
+        Neo4j 비밀번호
+    neo4j_database :
+        데이터베이스 이름 (기본값: "neo4j")
     """
 
     def __init__(
@@ -82,6 +127,17 @@ class NVMeRAGPipeline:
         embed_model=None,
         llm=None,
         chunker_kwargs: Optional[dict] = None,
+        # Qdrant
+        qdrant_host: Optional[str] = None,
+        qdrant_port: int = 6333,
+        qdrant_path: Optional[str] = None,
+        qdrant_collection: str = "nvme_docs",
+        enable_hybrid: bool = False,
+        # Neo4j
+        neo4j_url: Optional[str] = None,
+        neo4j_username: str = "neo4j",
+        neo4j_password: Optional[str] = None,
+        neo4j_database: str = "neo4j",
     ) -> None:
         if embed_model:
             Settings.embed_model = embed_model
@@ -90,9 +146,75 @@ class NVMeRAGPipeline:
 
         self._chunker = NVMeChunker(**(chunker_kwargs or {}))
         self._index: Optional[VectorStoreIndex] = None
+        self._graph_index: Optional[KnowledgeGraphIndex] = None
+
+        # Qdrant 설정 저장
+        self._qdrant_host = qdrant_host
+        self._qdrant_port = qdrant_port
+        self._qdrant_path = qdrant_path
+        self._qdrant_collection = qdrant_collection
+        self._enable_hybrid = enable_hybrid
+
+        # Neo4j 설정 저장
+        self._neo4j_url = neo4j_url
+        self._neo4j_username = neo4j_username
+        self._neo4j_password = neo4j_password
+        self._neo4j_database = neo4j_database
 
     # ------------------------------------------------------------------
-    # 인덱스 빌드
+    # Qdrant 헬퍼
+    # ------------------------------------------------------------------
+
+    def _make_qdrant_vector_store(self):
+        """Qdrant 설정에 따라 VectorStore를 반환합니다."""
+        from qdrant_client import QdrantClient
+        from llama_index.vector_stores.qdrant import QdrantVectorStore
+
+        if self._qdrant_host:
+            client = QdrantClient(host=self._qdrant_host, port=self._qdrant_port)
+            print(f"[Qdrant] 원격 서버 연결: {self._qdrant_host}:{self._qdrant_port}")
+        elif self._qdrant_path:
+            client = QdrantClient(path=self._qdrant_path)
+            print(f"[Qdrant] 로컬 저장소 연결: {self._qdrant_path}")
+        else:
+            raise ValueError(
+                "Qdrant를 사용하려면 qdrant_host 또는 qdrant_path를 지정하세요."
+            )
+
+        mode = "hybrid" if self._enable_hybrid else "dense"
+        print(f"[Qdrant] 컬렉션: '{self._qdrant_collection}' | 모드: {mode}")
+        return QdrantVectorStore(
+            client=client,
+            collection_name=self._qdrant_collection,
+            enable_hybrid=self._enable_hybrid,
+            # hybrid 모드에서 sparse 인코더 배치 크기
+            batch_size=20,
+        )
+
+    # ------------------------------------------------------------------
+    # Neo4j 헬퍼
+    # ------------------------------------------------------------------
+
+    def _make_neo4j_graph_store(self):
+        """Neo4j GraphStore를 반환합니다."""
+        from llama_index.graph_stores.neo4j import Neo4jGraphStore
+
+        if not self._neo4j_url or not self._neo4j_password:
+            raise ValueError(
+                "Neo4j를 사용하려면 neo4j_url과 neo4j_password를 지정하세요."
+            )
+
+        graph_store = Neo4jGraphStore(
+            username=self._neo4j_username,
+            password=self._neo4j_password,
+            url=self._neo4j_url,
+            database=self._neo4j_database,
+        )
+        print(f"[Neo4j] 연결: {self._neo4j_url} (DB: {self._neo4j_database})")
+        return graph_store
+
+    # ------------------------------------------------------------------
+    # 벡터 인덱스 빌드
     # ------------------------------------------------------------------
 
     def build_index(
@@ -103,10 +225,13 @@ class NVMeRAGPipeline:
         """
         PDF를 청킹하고 VectorStoreIndex를 생성합니다.
 
+        ChromaDB 파라미터가 설정된 경우 ChromaDB에 저장합니다.
+        설정되지 않은 경우 기본 in-memory 스토어를 사용합니다.
+
         Parameters
         ----------
         pdf_path : PDF 파일 경로
-        persist_dir : 인덱스를 저장할 디렉토리 (None이면 저장 안 함)
+        persist_dir : 인덱스를 저장할 디렉토리 (in-memory 모드에서만 사용)
         """
         print(f"[NVMeRAG] 청킹 시작: {pdf_path}")
         chunks = self._chunker.chunk_pdf(pdf_path)
@@ -115,57 +240,151 @@ class NVMeRAGPipeline:
         nodes = nvme_chunks_to_nodes(chunks)
         print(f"[NVMeRAG] LlamaIndex 노드 변환 완료: {len(nodes)}개")
 
-        self._index = VectorStoreIndex(nodes, show_progress=True)
-
-        if persist_dir:
-            persist_dir = Path(persist_dir)
-            persist_dir.mkdir(parents=True, exist_ok=True)
-            self._index.storage_context.persist(persist_dir=str(persist_dir))
-            print(f"[NVMeRAG] 인덱스 저장 완료: {persist_dir}")
+        use_qdrant = self._qdrant_host or self._qdrant_path
+        if use_qdrant:
+            vector_store = self._make_qdrant_vector_store()
+            storage_context = StorageContext.from_defaults(vector_store=vector_store)
+            self._index = VectorStoreIndex(
+                nodes,
+                storage_context=storage_context,
+                show_progress=True,
+            )
+            print("[NVMeRAG] Qdrant 인덱스 빌드 완료 (자동 영구 저장)")
+        else:
+            self._index = VectorStoreIndex(nodes, show_progress=True)
+            if persist_dir:
+                persist_dir = Path(persist_dir)
+                persist_dir.mkdir(parents=True, exist_ok=True)
+                self._index.storage_context.persist(persist_dir=str(persist_dir))
+                print(f"[NVMeRAG] 인덱스 저장 완료: {persist_dir}")
 
         return self._index
 
     def load_index(self, persist_dir: str | Path) -> VectorStoreIndex:
-        """저장된 인덱스를 불러옵니다."""
-        storage_context = StorageContext.from_defaults(
-            persist_dir=str(persist_dir)
-        )
-        self._index = load_index_from_storage(storage_context)
-        print(f"[NVMeRAG] 인덱스 로드 완료: {persist_dir}")
+        """
+        저장된 인덱스를 불러옵니다.
+
+        ChromaDB 파라미터가 설정된 경우 ChromaDB에서 로드합니다.
+        """
+        use_qdrant = self._qdrant_host or self._qdrant_path
+        if use_qdrant:
+            vector_store = self._make_qdrant_vector_store()
+            storage_context = StorageContext.from_defaults(vector_store=vector_store)
+            self._index = VectorStoreIndex.from_vector_store(
+                vector_store,
+                storage_context=storage_context,
+            )
+            print("[NVMeRAG] Qdrant에서 인덱스 로드 완료")
+        else:
+            storage_context = StorageContext.from_defaults(
+                persist_dir=str(persist_dir)
+            )
+            self._index = load_index_from_storage(storage_context)
+            print(f"[NVMeRAG] 인덱스 로드 완료: {persist_dir}")
+
         return self._index
 
     # ------------------------------------------------------------------
-    # 쿼리
+    # Neo4j 그래프 인덱스 빌드
+    # ------------------------------------------------------------------
+
+    def build_graph_index(
+        self,
+        pdf_path: str | Path,
+        max_triplets_per_chunk: int = 2,
+        include_embeddings: bool = True,
+    ) -> KnowledgeGraphIndex:
+        """
+        PDF를 청킹하고 Neo4j Knowledge Graph Index를 생성합니다.
+
+        LLM이 각 청크에서 (주어, 관계, 목적어) 트리플을 추출해 Neo4j에 저장합니다.
+
+        Parameters
+        ----------
+        pdf_path : PDF 파일 경로
+        max_triplets_per_chunk : 청크당 최대 추출 트리플 수 (기본값: 2)
+        include_embeddings : 노드에 임베딩을 포함할지 여부 (기본값: True)
+        """
+        print(f"[NVMeRAG/Graph] 청킹 시작: {pdf_path}")
+        chunks = self._chunker.chunk_pdf(pdf_path)
+        print(f"[NVMeRAG/Graph] 청크 생성 완료: {len(chunks)}개")
+
+        nodes = nvme_chunks_to_nodes(chunks)
+
+        graph_store = self._make_neo4j_graph_store()
+
+        storage_context = StorageContext.from_defaults(graph_store=graph_store)
+
+        print(f"[NVMeRAG/Graph] Knowledge Graph 구축 중 (청크당 최대 {max_triplets_per_chunk}개 트리플)...")
+        self._graph_index = KnowledgeGraphIndex(
+            nodes,
+            storage_context=storage_context,
+            max_triplets_per_chunk=max_triplets_per_chunk,
+            include_embeddings=include_embeddings,
+            show_progress=True,
+        )
+        print("[NVMeRAG/Graph] Neo4j Knowledge Graph 구축 완료")
+        return self._graph_index
+
+    def load_graph_index(self) -> KnowledgeGraphIndex:
+        """Neo4j에서 기존 그래프 인덱스를 로드합니다."""
+        graph_store = self._make_neo4j_graph_store()
+        storage_context = StorageContext.from_defaults(graph_store=graph_store)
+        self._graph_index = KnowledgeGraphIndex.from_existing(
+            storage_context=storage_context,
+        )
+        print("[NVMeRAG/Graph] Neo4j 그래프 인덱스 로드 완료")
+        return self._graph_index
+
+    # ------------------------------------------------------------------
+    # 쿼리 (벡터)
     # ------------------------------------------------------------------
 
     def query(
         self,
         question: str,
         similarity_top_k: int = 5,
+        sparse_top_k: int = 10,
         response_mode: str = "compact",
+        hybrid: Optional[bool] = None,
     ):
         """
-        질문에 대한 답변을 생성합니다.
+        벡터 인덱스로 질문에 대한 답변을 생성합니다.
 
         Parameters
         ----------
         question : 질문 문자열
-        similarity_top_k : 검색할 상위 청크 수
+        similarity_top_k : dense 검색 상위 청크 수
+        sparse_top_k : sparse 검색 상위 청크 수 (hybrid 모드에서만 사용)
         response_mode : "compact" | "refine" | "tree_summarize"
+        hybrid : True면 hybrid 검색 강제. None이면 enable_hybrid 설정을 따름.
         """
         if self._index is None:
             raise RuntimeError("인덱스가 없습니다. build_index() 또는 load_index()를 먼저 호출하세요.")
 
-        query_engine = self._index.as_query_engine(
-            similarity_top_k=similarity_top_k,
-            response_mode=response_mode,
-        )
+        use_hybrid = hybrid if hybrid is not None else self._enable_hybrid
+
+        if use_hybrid:
+            from llama_index.core.vector_stores.types import VectorStoreQueryMode
+            query_engine = self._index.as_query_engine(
+                similarity_top_k=similarity_top_k,
+                sparse_top_k=sparse_top_k,
+                vector_store_query_mode=VectorStoreQueryMode.HYBRID,
+                response_mode=response_mode,
+            )
+        else:
+            query_engine = self._index.as_query_engine(
+                similarity_top_k=similarity_top_k,
+                response_mode=response_mode,
+            )
         return query_engine.query(question)
 
     def retrieve(
         self,
         question: str,
         similarity_top_k: int = 5,
+        sparse_top_k: int = 10,
+        hybrid: Optional[bool] = None,
     ) -> list:
         """
         질문과 유사한 청크를 검색합니다 (LLM 생성 없이 검색만).
@@ -177,7 +396,68 @@ class NVMeRAGPipeline:
         if self._index is None:
             raise RuntimeError("인덱스가 없습니다.")
 
-        retriever = self._index.as_retriever(
+        use_hybrid = hybrid if hybrid is not None else self._enable_hybrid
+
+        if use_hybrid:
+            from llama_index.core.vector_stores.types import VectorStoreQueryMode
+            retriever = self._index.as_retriever(
+                similarity_top_k=similarity_top_k,
+                sparse_top_k=sparse_top_k,
+                vector_store_query_mode=VectorStoreQueryMode.HYBRID,
+            )
+        else:
+            retriever = self._index.as_retriever(
+                similarity_top_k=similarity_top_k,
+            )
+        return retriever.retrieve(question)
+
+    # ------------------------------------------------------------------
+    # 쿼리 (그래프)
+    # ------------------------------------------------------------------
+
+    def query_graph(
+        self,
+        question: str,
+        similarity_top_k: int = 5,
+        response_mode: str = "compact",
+        use_keyword: bool = True,
+        use_global: bool = False,
+    ):
+        """
+        Neo4j Knowledge Graph 인덱스로 질문에 대한 답변을 생성합니다.
+
+        Parameters
+        ----------
+        question : 질문 문자열
+        similarity_top_k : 검색할 상위 노드 수
+        response_mode : "compact" | "refine" | "tree_summarize"
+        use_keyword : 키워드 기반 그래프 탐색 활성화 (기본값: True)
+        use_global : 전체 그래프 컨텍스트 포함 여부 (느리지만 포괄적)
+        """
+        if self._graph_index is None:
+            raise RuntimeError(
+                "그래프 인덱스가 없습니다. build_graph_index() 또는 load_graph_index()를 먼저 호출하세요."
+            )
+
+        query_engine = self._graph_index.as_query_engine(
+            include_text=True,
+            retriever_mode="keyword" if use_keyword else "embedding",
+            response_mode=response_mode,
+            similarity_top_k=similarity_top_k,
+            graph_store_query_depth=2,
+        )
+        return query_engine.query(question)
+
+    def retrieve_from_graph(
+        self,
+        question: str,
+        similarity_top_k: int = 5,
+    ) -> list:
+        """그래프에서 관련 트리플을 검색합니다 (LLM 없이)."""
+        if self._graph_index is None:
+            raise RuntimeError("그래프 인덱스가 없습니다.")
+
+        retriever = self._graph_index.as_retriever(
             similarity_top_k=similarity_top_k,
         )
         return retriever.retrieve(question)
