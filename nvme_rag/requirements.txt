@@ -1,0 +1,19 @@
+# NVMe RAG - 의존성
+# PDF 파싱
+PyMuPDF>=1.23.0          # fitz - 고품질 PDF 텍스트/레이아웃 추출
+
+# LlamaIndex 코어
+llama-index-core>=0.10.0
+
+# 임베딩 (OpenAI 기본, 변경 가능)
+llama-index-embeddings-openai>=0.1.0
+
+# LLM (OpenAI 기본, 변경 가능)
+llama-index-llms-openai>=0.1.0
+
+# 로컬 임베딩 대안 (OpenAI 없이 사용 시 주석 해제)
+# llama-index-embeddings-huggingface>=0.2.0
+# sentence-transformers>=2.2.0
+
+# 로컬 LLM 대안 (Ollama 사용 시 주석 해제)
+# llama-index-llms-ollama>=0.1.0
