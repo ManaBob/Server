@@ -8,9 +8,9 @@ NVMe RAG - 실행 예시
     # 인덱스 빌드 (기본: in-memory)
     python main.py build <pdf_path> [--persist ./index_store]
 
-    # ChromaDB에 인덱스 빌드
-    python main.py --chroma-host localhost build <pdf_path>
-    python main.py --chroma-path ./chroma_db build <pdf_path>
+    # Qdrant에 인덱스 빌드
+    python main.py --qdrant-host localhost build <pdf_path>
+    python main.py --qdrant-path ./qdrant_db build <pdf_path>
 
     # Neo4j Knowledge Graph 구축
     python main.py --neo4j-url bolt://localhost:7687 --neo4j-password pw graph-build <pdf_path>
@@ -66,12 +66,12 @@ def make_pipeline(args):
     from core.pipeline import NVMeRAGPipeline
 
     # 환경변수 fallback 처리
-    chroma_host = getattr(args, "chroma_host", None) or os.environ.get("CHROMA_HOST")
-    chroma_port = getattr(args, "chroma_port", 8000) or int(os.environ.get("CHROMA_PORT", 8000))
-    chroma_path = getattr(args, "chroma_path", None) or os.environ.get("CHROMA_PATH")
-    chroma_collection = (
-        getattr(args, "chroma_collection", None)
-        or os.environ.get("CHROMA_COLLECTION", "nvme_docs")
+    qdrant_host = getattr(args, "qdrant_host", None) or os.environ.get("QDRANT_HOST")
+    qdrant_port = getattr(args, "qdrant_port", 6333) or int(os.environ.get("QDRANT_PORT", 6333))
+    qdrant_path = getattr(args, "qdrant_path", None) or os.environ.get("QDRANT_PATH")
+    qdrant_collection = (
+        getattr(args, "qdrant_collection", None)
+        or os.environ.get("QDRANT_COLLECTION", "nvme_docs")
     )
 
     neo4j_url = getattr(args, "neo4j_url", None) or os.environ.get("NEO4J_URL")
@@ -90,10 +90,10 @@ def make_pipeline(args):
             "max_chunk_size": args.chunk_size,
             "overlap_size": args.overlap,
         },
-        chroma_host=chroma_host,
-        chroma_port=chroma_port,
-        chroma_path=chroma_path,
-        chroma_collection=chroma_collection,
+        qdrant_host=qdrant_host,
+        qdrant_port=qdrant_port,
+        qdrant_path=qdrant_path,
+        qdrant_collection=qdrant_collection,
         neo4j_url=neo4j_url,
         neo4j_username=neo4j_username,
         neo4j_password=neo4j_password,
@@ -146,14 +146,14 @@ def cmd_query(args):
     setup_llm(use_local=args.local)
     pipeline = make_pipeline(args)
 
-    use_chroma = (
-        getattr(args, "chroma_host", None)
-        or os.environ.get("CHROMA_HOST")
-        or getattr(args, "chroma_path", None)
-        or os.environ.get("CHROMA_PATH")
+    use_qdrant = (
+        getattr(args, "qdrant_host", None)
+        or os.environ.get("QDRANT_HOST")
+        or getattr(args, "qdrant_path", None)
+        or os.environ.get("QDRANT_PATH")
     )
 
-    if use_chroma:
+    if use_qdrant:
         pipeline.load_index(persist_dir=None)
     elif args.persist and Path(args.persist).exists():
         pipeline.load_index(args.persist)
@@ -227,13 +227,13 @@ def main():
     parser.add_argument("--overlap", type=int, default=200, help="청크 간 overlap 크기")
     parser.add_argument("--local", action="store_true", help="로컬 LLM/임베딩 사용")
 
-    # ChromaDB 공통 옵션
-    chroma_group = parser.add_argument_group("ChromaDB (벡터 스토어)")
-    chroma_ex = chroma_group.add_mutually_exclusive_group()
-    chroma_ex.add_argument("--chroma-host", help="ChromaDB 서버 호스트 (예: localhost)")
-    chroma_ex.add_argument("--chroma-path", help="ChromaDB 로컬 저장 경로 (예: ./chroma_db)")
-    chroma_group.add_argument("--chroma-port", type=int, default=8000, help="ChromaDB 포트 (기본: 8000)")
-    chroma_group.add_argument("--chroma-collection", default="nvme_docs", help="ChromaDB 컬렉션 이름")
+    # Qdrant 공통 옵션
+    qdrant_group = parser.add_argument_group("Qdrant (벡터 스토어)")
+    qdrant_ex = qdrant_group.add_mutually_exclusive_group()
+    qdrant_ex.add_argument("--qdrant-host", help="Qdrant 서버 호스트 (예: localhost)")
+    qdrant_ex.add_argument("--qdrant-path", help="Qdrant 로컬 저장 경로 (예: ./qdrant_db)")
+    qdrant_group.add_argument("--qdrant-port", type=int, default=6333, help="Qdrant 포트 (기본: 6333)")
+    qdrant_group.add_argument("--qdrant-collection", default="nvme_docs", help="Qdrant 컬렉션 이름")
 
     # Neo4j 공통 옵션
     neo4j_group = parser.add_argument_group("Neo4j (그래프 스토어)")

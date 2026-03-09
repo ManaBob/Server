@@ -4,8 +4,8 @@ NVMe RAG Pipeline (LlamaIndex)
 NVMeChunk -> LlamaIndex TextNode -> VectorStoreIndex 흐름을 담당합니다.
 
 지원 벡터 스토어:
-  - 기본 (in-memory)  : ChromaDB 설정 없이 사용
-  - ChromaDB          : chroma_* 파라미터 전달 시 자동 사용
+  - 기본 (in-memory)  : Qdrant 설정 없이 사용
+  - Qdrant            : qdrant_* 파라미터 전달 시 자동 사용
 
 지원 그래프 스토어:
   - Neo4j             : build_graph_index() 호출 시 사용
@@ -15,10 +15,14 @@ NVMeChunk -> LlamaIndex TextNode -> VectorStoreIndex 흐름을 담당합니다.
     pipeline = NVMeRAGPipeline()
     pipeline.build_index("nvme_spec.pdf")
 
-    # ChromaDB
+    # Qdrant (원격)
     pipeline = NVMeRAGPipeline(
-        chroma_host="localhost", chroma_port=8000, chroma_collection="nvme"
+        qdrant_host="localhost", qdrant_port=6333, qdrant_collection="nvme"
     )
+    pipeline.build_index("nvme_spec.pdf")
+
+    # Qdrant (로컬 파일)
+    pipeline = NVMeRAGPipeline(qdrant_path="./qdrant_db", qdrant_collection="nvme")
     pipeline.build_index("nvme_spec.pdf")
 
     # Neo4j 그래프
@@ -94,13 +98,13 @@ class NVMeRAGPipeline:
     chunker_kwargs :
         NVMeChunker 생성자에 전달할 키워드 인자.
 
-    ChromaDB 파라미터 (셋 중 하나를 선택)
+    Qdrant 파라미터 (둘 중 하나를 선택)
     ----------------------------------------
-    chroma_host, chroma_port :
-        원격 ChromaDB 서버 주소 (HttpClient). 예: "localhost", 8000
-    chroma_path :
-        로컬 ChromaDB 경로 (PersistentClient). 예: "./chroma_db"
-    chroma_collection :
+    qdrant_host, qdrant_port :
+        원격 Qdrant 서버 주소. 예: "localhost", 6333
+    qdrant_path :
+        로컬 Qdrant 저장 경로. 예: "./qdrant_db"
+    qdrant_collection :
         사용할 컬렉션 이름 (기본값: "nvme_docs")
 
     Neo4j 파라미터
@@ -120,11 +124,11 @@ class NVMeRAGPipeline:
         embed_model=None,
         llm=None,
         chunker_kwargs: Optional[dict] = None,
-        # ChromaDB
-        chroma_host: Optional[str] = None,
-        chroma_port: int = 8000,
-        chroma_path: Optional[str] = None,
-        chroma_collection: str = "nvme_docs",
+        # Qdrant
+        qdrant_host: Optional[str] = None,
+        qdrant_port: int = 6333,
+        qdrant_path: Optional[str] = None,
+        qdrant_collection: str = "nvme_docs",
         # Neo4j
         neo4j_url: Optional[str] = None,
         neo4j_username: str = "neo4j",
@@ -140,11 +144,11 @@ class NVMeRAGPipeline:
         self._index: Optional[VectorStoreIndex] = None
         self._graph_index: Optional[KnowledgeGraphIndex] = None
 
-        # ChromaDB 설정 저장
-        self._chroma_host = chroma_host
-        self._chroma_port = chroma_port
-        self._chroma_path = chroma_path
-        self._chroma_collection = chroma_collection
+        # Qdrant 설정 저장
+        self._qdrant_host = qdrant_host
+        self._qdrant_port = qdrant_port
+        self._qdrant_path = qdrant_path
+        self._qdrant_collection = qdrant_collection
 
         # Neo4j 설정 저장
         self._neo4j_url = neo4j_url
@@ -153,31 +157,30 @@ class NVMeRAGPipeline:
         self._neo4j_database = neo4j_database
 
     # ------------------------------------------------------------------
-    # ChromaDB 헬퍼
+    # Qdrant 헬퍼
     # ------------------------------------------------------------------
 
-    def _make_chroma_vector_store(self):
-        """ChromaDB 설정에 따라 VectorStore를 반환합니다."""
-        import chromadb
-        from llama_index.vector_stores.chroma import ChromaVectorStore
+    def _make_qdrant_vector_store(self):
+        """Qdrant 설정에 따라 VectorStore를 반환합니다."""
+        from qdrant_client import QdrantClient
+        from llama_index.vector_stores.qdrant import QdrantVectorStore
 
-        if self._chroma_host:
-            client = chromadb.HttpClient(
-                host=self._chroma_host,
-                port=self._chroma_port,
-            )
-            print(f"[ChromaDB] HTTP 클라이언트 연결: {self._chroma_host}:{self._chroma_port}")
-        elif self._chroma_path:
-            client = chromadb.PersistentClient(path=self._chroma_path)
-            print(f"[ChromaDB] 로컬 저장소 연결: {self._chroma_path}")
+        if self._qdrant_host:
+            client = QdrantClient(host=self._qdrant_host, port=self._qdrant_port)
+            print(f"[Qdrant] 원격 서버 연결: {self._qdrant_host}:{self._qdrant_port}")
+        elif self._qdrant_path:
+            client = QdrantClient(path=self._qdrant_path)
+            print(f"[Qdrant] 로컬 저장소 연결: {self._qdrant_path}")
         else:
             raise ValueError(
-                "ChromaDB를 사용하려면 chroma_host 또는 chroma_path를 지정하세요."
+                "Qdrant를 사용하려면 qdrant_host 또는 qdrant_path를 지정하세요."
             )
 
-        collection = client.get_or_create_collection(self._chroma_collection)
-        print(f"[ChromaDB] 컬렉션: '{self._chroma_collection}' (기존 문서 수: {collection.count()})")
-        return ChromaVectorStore(chroma_collection=collection)
+        print(f"[Qdrant] 컬렉션: '{self._qdrant_collection}'")
+        return QdrantVectorStore(
+            client=client,
+            collection_name=self._qdrant_collection,
+        )
 
     # ------------------------------------------------------------------
     # Neo4j 헬퍼
@@ -228,16 +231,16 @@ class NVMeRAGPipeline:
         nodes = nvme_chunks_to_nodes(chunks)
         print(f"[NVMeRAG] LlamaIndex 노드 변환 완료: {len(nodes)}개")
 
-        use_chroma = self._chroma_host or self._chroma_path
-        if use_chroma:
-            vector_store = self._make_chroma_vector_store()
+        use_qdrant = self._qdrant_host or self._qdrant_path
+        if use_qdrant:
+            vector_store = self._make_qdrant_vector_store()
             storage_context = StorageContext.from_defaults(vector_store=vector_store)
             self._index = VectorStoreIndex(
                 nodes,
                 storage_context=storage_context,
                 show_progress=True,
             )
-            print("[NVMeRAG] ChromaDB 인덱스 빌드 완료 (자동 영구 저장)")
+            print("[NVMeRAG] Qdrant 인덱스 빌드 완료 (자동 영구 저장)")
         else:
             self._index = VectorStoreIndex(nodes, show_progress=True)
             if persist_dir:
@@ -254,15 +257,15 @@ class NVMeRAGPipeline:
 
         ChromaDB 파라미터가 설정된 경우 ChromaDB에서 로드합니다.
         """
-        use_chroma = self._chroma_host or self._chroma_path
-        if use_chroma:
-            vector_store = self._make_chroma_vector_store()
+        use_qdrant = self._qdrant_host or self._qdrant_path
+        if use_qdrant:
+            vector_store = self._make_qdrant_vector_store()
             storage_context = StorageContext.from_defaults(vector_store=vector_store)
             self._index = VectorStoreIndex.from_vector_store(
                 vector_store,
                 storage_context=storage_context,
             )
-            print("[NVMeRAG] ChromaDB에서 인덱스 로드 완료")
+            print("[NVMeRAG] Qdrant에서 인덱스 로드 완료")
         else:
             storage_context = StorageContext.from_defaults(
                 persist_dir=str(persist_dir)
