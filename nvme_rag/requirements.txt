@@ -1,6 +1,11 @@
 # NVMe RAG - 의존성
-# PDF 파싱
-PyMuPDF>=1.23.0          # fitz - 고품질 PDF 텍스트/레이아웃 추출
+# Python 3.9 ~ 3.13 호환
+
+# 환경변수 (.env 파일 로딩)
+python-dotenv>=1.0.0
+
+# PDF 파싱 (Python 3.13 지원: 1.24.0+)
+PyMuPDF>=1.24.0          # fitz - 고품질 PDF 텍스트/레이아웃 추출
 
 # LlamaIndex 코어
 llama-index-core>=0.10.0

@@ -10,12 +10,19 @@ NVMe RAG - 실행 예시
 
     # 쿼리
     python main.py query "What is the Admin Submission Queue?" [--persist ./index_store]
+
+API Key 설정:
+    cp .env.example .env  # 후 OPENAI_API_KEY 값 입력
 """
 
 import argparse
 import os
 import sys
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()  # .env 파일에서 환경변수 로드 (없으면 무시)
 
 
 def setup_llm(use_local: bool = False):
