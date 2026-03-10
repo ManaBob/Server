@@ -46,13 +46,15 @@ def nvme_chunks_to_nodes(chunks: list[NVMeChunk]) -> list[TextNode]:
                 "{content}"
             ),
         )
-        # 섹션 제목을 excluded_embed_metadata_keys에서 제외해 임베딩에 포함
+        # 임베딩에서 제외: 검색 정확도에 기여하지 않는 내부 식별자 / 중복 필드
         node.excluded_embed_metadata_keys = [
             "chunk_index",
             "page_end",
         ]
+        # LLM 컨텍스트에서 제외: LLM 응답에 불필요한 내부 필드
         node.excluded_llm_metadata_keys = [
             "chunk_index",
+            "has_normative_language",  # 내부 플래그, LLM 응답에 불필요
         ]
         nodes.append(node)
     return nodes

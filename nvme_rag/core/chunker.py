@@ -3,11 +3,20 @@ NVMe Spec Chunker
 -----------------
 NVMe 스펙 PDF를 구조-aware하게 청킹합니다.
 
-청킹 전략:
-1. 계층적 섹션 분리 (1.1, 1.1.1, ... 패턴)
-2. 테이블은 원자 단위로 보존 + 소속 섹션 메타데이터
-3. 레지스터/필드 정의 블록 보존
-4. 각 청크에 풍부한 메타데이터 부착 (섹션 번호, 제목, 페이지, 부모 섹션)
+문서 구조 인식:
+  Document → Chapter → Section/Subsection → Paragraph / Table / Figure
+           → Field definition → Note/Requirement
+
+청크 타입 (4종):
+  section  - 설명 문단 중심 (command overview, 개념 설명)
+  table    - 표 전체 또는 row group (Identify Controller Data Structure, SMART 등)
+  field    - 필드 정의 1개 또는 묶음 (MPTR, PRP1, Bits XX:YY 등)
+  note     - NOTE: / Warning: / shall·must 전용 단락 (제약 / 예외사항)
+
+메타데이터 (모든 청크 공통):
+  chunk_type, section_number, section_title, section_depth,
+  parent_section, page_start, page_end, chunk_index,
+  has_normative_language
 """
 
 from __future__ import annotations
@@ -17,7 +26,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import fitz  # PyMuPDF
+# PyMuPDF는 PDF 파싱에만 필요하므로 optional import
+try:
+    import fitz  # PyMuPDF
+    _FITZ_AVAILABLE = True
+except ImportError:
+    _FITZ_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
@@ -26,22 +40,35 @@ import fitz  # PyMuPDF
 
 @dataclass
 class NVMeChunk:
-    """청킹된 단위 하나를 나타냅니다."""
+    """청킹된 단위 하나를 나타냅니다.
+
+    chunk_type:
+        "section" - 설명 문단
+        "table"   - 구조적 표 (Identify Controller Data Structure, SMART 등)
+        "field"   - 필드/레지스터 정의 (Bits XX:YY, MPTR, PRP1 등)
+        "note"    - NOTE: / Warning: / Caution: 블록
+    """
     text: str
-    chunk_type: str          # "section" | "table" | "figure" | "register"
+    chunk_type: str          # "section" | "table" | "field" | "note"
     section_number: str      # e.g. "3.1.2"
     section_title: str
-    parent_section: str      # e.g. "3.1"
+    parent_section: str      # e.g. "3.1"  (최상위는 "")
     page_start: int
     page_end: int
     chunk_index: int
     metadata: dict = field(default_factory=dict)
 
     def to_metadata(self) -> dict:
+        """LlamaIndex TextNode에 붙일 메타데이터 딕셔너리를 반환합니다."""
+        if self.section_number.startswith("Annex"):
+            depth = 1
+        else:
+            depth = len(self.section_number.split("."))
         return {
             "chunk_type": self.chunk_type,
             "section_number": self.section_number,
             "section_title": self.section_title,
+            "section_depth": depth,
             "parent_section": self.parent_section,
             "page_start": self.page_start,
             "page_end": self.page_end,
@@ -66,16 +93,35 @@ _ANNEX_RE = re.compile(
     re.MULTILINE,
 )
 
-# 테이블 캡션: "Figure 123:" 또는 "Table 456:"
+# 테이블/피겨 캡션: "Figure 123:" 또는 "Table 456:"
 _TABLE_CAPTION_RE = re.compile(
     r"^(Table|Figure)\s+(\d+)[:\s–\-—]+(.{0,100})$",
     re.MULTILINE,
 )
 
-# 레지스터 필드 정의 (Bits XX:YY 형태)
+# 필드/레지스터 정의 (Bits XX:YY 또는 Bit X 형태, 단일 비트 포함)
 _REGISTER_RE = re.compile(
-    r"^Bits?\s+\d+:\d+\b",
+    r"^Bits?\s+\d+(?::\d+)?\b",
     re.MULTILINE | re.IGNORECASE,
+)
+
+# "Bits  Description" 컬럼 헤더 형식 (NVMe spec Figure 테이블)
+# 예: Figure 31: Bits / Description 컬럼으로 구성된 필드 정의 테이블
+_FIELD_TABLE_HEADER_RE = re.compile(
+    r"^Bits\s{2,}(?:Description|Type|Value)\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+# NVMe 스펙 규범적 언어 (RFC 2119 용어)
+_NORMATIVE_RE = re.compile(
+    r"\b(shall(?: not)?|should(?: not)?|may(?: not)?|must(?: not)?)\b",
+    re.IGNORECASE,
+)
+
+# NOTE / Warning / Caution 블록 (단락 첫 줄 기준)
+_NOTE_BLOCK_RE = re.compile(
+    r"^(NOTE|note|Warning|Caution|CAUTION|WARNING|IMPORTANT)\s*[:\-–—]",
+    re.MULTILINE,
 )
 
 
@@ -88,9 +134,14 @@ class NVMePDFParser:
 
     def __init__(self, pdf_path: str | Path) -> None:
         self.pdf_path = Path(pdf_path)
-        self._doc: Optional[fitz.Document] = None
+        self._doc: Optional[object] = None
 
     def __enter__(self):
+        if not _FITZ_AVAILABLE:
+            raise ImportError(
+                "PyMuPDF(fitz)가 설치되어 있지 않습니다. "
+                "PDF 파싱에 필요합니다: pip install pymupdf"
+            )
         self._doc = fitz.open(str(self.pdf_path))
         return self
 
@@ -103,7 +154,7 @@ class NVMePDFParser:
         pages = []
         for page_num in range(len(self._doc)):
             page = self._doc[page_num]
-            text = page.get_text("text")  # 단순 텍스트 추출
+            text = page.get_text("text")
             pages.append({"page": page_num + 1, "text": text})
         return pages
 
@@ -197,7 +248,7 @@ class NVMeChunker:
     overlap_size : int
         분할 청크 간 겹치는 문자 수 (컨텍스트 보존).
     keep_tables_intact : bool
-        True면 테이블을 분할하지 않고 단일 청크로 유지합니다.
+        True면 테이블/피겨를 분할하지 않고 단일 청크로 유지합니다.
     """
 
     def __init__(
@@ -219,7 +270,6 @@ class NVMeChunker:
         """PDF 파일을 읽어 NVMeChunk 리스트로 반환합니다."""
         with NVMePDFParser(pdf_path) as parser:
             pages = parser.get_full_text_with_pages()
-
         return self._chunk_pages(pages)
 
     def chunk_text(self, text: str) -> list[NVMeChunk]:
@@ -250,17 +300,23 @@ class NVMeChunker:
         parent: str,
         start_idx: int,
     ) -> list[NVMeChunk]:
-        """섹션 하나를 처리하여 청크 목록을 반환합니다."""
+        """
+        섹션 하나를 처리하여 청크 목록을 반환합니다.
+
+        처리 순서:
+        1. Table / Figure 추출 → table 또는 field 청크
+        2. 나머지 텍스트 단락 분류 → section / field / note 청크
+        """
         chunks: list[NVMeChunk] = []
 
-        # 테이블/피겨를 먼저 추출
+        # ── 1. Table / Figure 추출 ─────────────────────────────────────
         text_parts, table_parts = self._extract_tables(sec.text)
 
-        # 테이블 청크
-        for tbl_text, tbl_meta in table_parts:
+        for tbl_text, tbl_meta, tbl_type in table_parts:
+            tbl_meta["has_normative_language"] = bool(_NORMATIVE_RE.search(tbl_text))
             chunks.append(NVMeChunk(
                 text=tbl_text,
-                chunk_type="table",
+                chunk_type=tbl_type,
                 section_number=sec.number,
                 section_title=sec.title,
                 parent_section=parent,
@@ -270,51 +326,106 @@ class NVMeChunker:
                 metadata=tbl_meta,
             ))
 
-        # 일반 텍스트 청크 (레지스터 블록 감지 포함)
+        # ── 2. 나머지 텍스트 → 단락 단위 분류 ─────────────────────────
         for part in text_parts:
             if not part.strip():
                 continue
-            chunk_type = "register" if _is_register_block(part) else "section"
-            sub_chunks = self._split_text(part)
+            self._classify_text_part(
+                part, sec, parent, start_idx, chunks
+            )
 
-            for sub in sub_chunks:
-                if not sub.strip():
-                    continue
+        return chunks
+
+    def _classify_text_part(
+        self,
+        part: str,
+        sec: _RawSection,
+        parent: str,
+        start_idx: int,
+        chunks: list[NVMeChunk],
+    ) -> None:
+        """
+        텍스트 파트를 단락 단위로 분류합니다.
+
+        - NOTE:/Warning:/Caution: 로 시작하는 단락 → note 청크
+        - Bits X:Y 형태의 레지스터/필드 정의 블록 → field 청크
+        - 그 외 → section 청크 (max_chunk_size 초과 시 분할)
+
+        연속된 non-note 단락은 하나로 묶어 처리합니다.
+        """
+        paragraphs = re.split(r"\n{2,}", part.strip())
+        regular_buf: list[str] = []
+
+        def _flush_regular():
+            """regular_buf를 section/field 청크로 변환합니다."""
+            if not regular_buf:
+                return
+            text = "\n\n".join(regular_buf)
+            chunk_type = "field" if _is_register_block(text) else "section"
+            for sub in self._split_text(text):
+                if sub.strip():
+                    chunks.append(NVMeChunk(
+                        text=sub,
+                        chunk_type=chunk_type,
+                        section_number=sec.number,
+                        section_title=sec.title,
+                        parent_section=parent,
+                        page_start=sec.page_start,
+                        page_end=sec.page_end,
+                        chunk_index=start_idx + len(chunks),
+                        metadata={"has_normative_language": bool(_NORMATIVE_RE.search(sub))},
+                    ))
+            regular_buf.clear()
+
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+
+            if _NOTE_BLOCK_RE.match(para):
+                _flush_regular()
                 chunks.append(NVMeChunk(
-                    text=sub,
-                    chunk_type=chunk_type,
+                    text=para,
+                    chunk_type="note",
                     section_number=sec.number,
                     section_title=sec.title,
                     parent_section=parent,
                     page_start=sec.page_start,
                     page_end=sec.page_end,
                     chunk_index=start_idx + len(chunks),
+                    metadata={"has_normative_language": bool(_NORMATIVE_RE.search(para))},
                 ))
+            else:
+                regular_buf.append(para)
 
-        return chunks
+        _flush_regular()
 
     def _extract_tables(
         self,
         text: str,
-    ) -> tuple[list[str], list[tuple[str, dict]]]:
+    ) -> tuple[list[str], list[tuple[str, dict, str]]]:
         """
         텍스트에서 Table/Figure 블록을 분리합니다.
+
+        chunk_type 결정:
+          - "Table X:" → "table"  (구조적 데이터 표)
+          - "Figure X:" + Bits 컬럼 → "field"  (필드/레지스터 정의)
+          - "Figure X:" + Bits 컬럼 없음 → "table"  (일반 피겨)
+
         Returns:
             text_parts: 테이블을 제거한 나머지 텍스트 조각들
-            table_parts: (table_text, metadata) 튜플 목록
+            table_parts: (table_text, metadata, chunk_type) 튜플 목록
         """
         if not self.keep_tables_intact:
             return [text], []
 
-        table_parts: list[tuple[str, dict]] = []
+        table_parts: list[tuple[str, dict, str]] = []
         text_parts: list[str] = []
 
         last_end = 0
         for match in _TABLE_CAPTION_RE.finditer(text):
-            # 캡션 앞부분 텍스트 저장
             text_parts.append(text[last_end:match.start()])
 
-            # 테이블 본문: 다음 섹션 헤더 or 다음 테이블 캡션까지
             tbl_start = match.start()
             next_section = _SECTION_HEADER_RE.search(text, match.end())
             next_table = _TABLE_CAPTION_RE.search(text, match.end())
@@ -323,12 +434,20 @@ class NVMeChunker:
             tbl_end = min(candidates) if candidates else len(text)
 
             tbl_text = text[tbl_start:tbl_end].strip()
+            caption_type = match.group(1)   # "Table" or "Figure"
+
+            # Figure + Bits 컬럼 형식 → field chunk
+            if caption_type == "Figure" and _is_register_block(tbl_text):
+                chunk_type = "field"
+            else:
+                chunk_type = "table"
+
             tbl_meta = {
-                "table_type": match.group(1),   # Table or Figure
-                "table_number": match.group(2),
+                "table_type": caption_type,
+                "table_number": int(match.group(2)),
                 "table_caption": match.group(3).strip(),
             }
-            table_parts.append((tbl_text, tbl_meta))
+            table_parts.append((tbl_text, tbl_meta, chunk_type))
             last_end = tbl_end
 
         text_parts.append(text[last_end:])
@@ -340,7 +459,6 @@ class NVMeChunker:
             return [text]
 
         chunks: list[str] = []
-        # 문단 단위로 분할 시도
         paragraphs = re.split(r"\n{2,}", text)
         current = ""
 
@@ -350,7 +468,6 @@ class NVMeChunker:
             else:
                 if current:
                     chunks.append(current)
-                # 문단 자체가 max_chunk_size 초과하는 경우 강제 분할
                 if len(para) > self.max_chunk_size:
                     for i in range(0, len(para), self.max_chunk_size - self.overlap_size):
                         chunks.append(para[i:i + self.max_chunk_size])
@@ -361,7 +478,6 @@ class NVMeChunker:
         if current:
             chunks.append(current)
 
-        # overlap 적용
         if self.overlap_size > 0 and len(chunks) > 1:
             chunks = _apply_overlap(chunks, self.overlap_size)
 
@@ -379,8 +495,13 @@ def _parent_section(section_number: str) -> str:
 
 
 def _is_register_block(text: str) -> bool:
-    """텍스트가 레지스터 필드 정의 블록인지 판단합니다."""
-    return bool(_REGISTER_RE.search(text))
+    """텍스트가 레지스터/필드 정의 블록인지 판단합니다.
+
+    아래 중 하나라도 해당하면 True:
+    - 'Bits XX:YY' 또는 'Bit X' 패턴이 있는 경우 (inline 형식)
+    - 'Bits  Description' 컬럼 헤더가 있는 경우 (NVMe Figure 테이블 형식)
+    """
+    return bool(_REGISTER_RE.search(text)) or bool(_FIELD_TABLE_HEADER_RE.search(text))
 
 
 def _apply_overlap(chunks: list[str], overlap: int) -> list[str]:
